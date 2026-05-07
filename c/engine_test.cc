@@ -142,6 +142,28 @@ TEST(EngineCTest, SetCacheDir) {
             cache_dir);
 }
 
+TEST(EngineCTest, SetCacheDirWithVisionAndAudio) {
+  const std::string task_path = "test_model_path_1";
+  EngineSettingsPtr settings(
+      litert_lm_engine_settings_create(task_path.c_str(), "cpu",
+                                       /* vision_backend_str */ "gpu",
+                                       /* audio_backend_str */ "cpu"),
+      &litert_lm_engine_settings_delete);
+  ASSERT_NE(settings, nullptr);
+  EXPECT_TRUE(settings->settings->GetVisionExecutorSettings().has_value());
+  EXPECT_TRUE(settings->settings->GetAudioExecutorSettings().has_value());
+
+  const std::string cache_dir = "test_cache_dir";
+  litert_lm_engine_settings_set_cache_dir(settings.get(), cache_dir.c_str());
+
+  EXPECT_EQ(settings->settings->GetMainExecutorSettings().GetCacheDir(),
+            cache_dir);
+  EXPECT_EQ(settings->settings->GetVisionExecutorSettings()->GetCacheDir(),
+            cache_dir);
+  EXPECT_EQ(settings->settings->GetAudioExecutorSettings()->GetCacheDir(),
+            cache_dir);
+}
+
 TEST(EngineCTest, SetMaxNumImages) {
   const std::string task_path = "test_model_path_1";
   EngineSettingsPtr settings(
