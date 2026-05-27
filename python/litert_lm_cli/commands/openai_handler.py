@@ -26,12 +26,16 @@ import dataclasses
 import datetime
 import http.server
 import json
+import os
 import traceback
 from typing import Any
 
 import click
 
 import litert_lm
+from litert_lm_cli import (
+    model as cli_model,
+)
 from litert_lm_cli.commands import serve_util
 
 
@@ -447,6 +451,52 @@ class OpenAIHandler(http.server.BaseHTTPRequestHandler):
 
     formatter = _OpenAIV1ResponsesFormatter(now_str, created_ts, model_id)
     self._stream_response(conv, prompt, formatter)
+
+  def do_GET(self) -> None:  # pylint: disable=invalid-name
+    """Handles GET requests for OpenAI API compatible endpoints."""
+    path_without_query, *_ = self.path.split("?", 1)
+    if path_without_query != "/v1/models":
+      self.send_error(404, "Not Found")
+      return
+
+    try:
+      models = cli_model.Model.get_all_models()
+      data = []
+      for m in models:
+        try:
+          created_ts = int(os.path.getmtime(m.model_path))
+        except OSError:
+          created_ts = 0
+        data.append({
+            "id": m.model_id,
+            "object": "model",
+            "created": created_ts,
+            "owned_by": "litert-lm",
+        })
+
+      resp_body = {
+          "object": "list",
+          "data": data,
+      }
+
+      self.send_response(200)
+      self.send_header("Content-Type", "application/json")
+      self.end_headers()
+      self.wfile.write(
+          json.dumps(resp_body, ensure_ascii=False).encode("utf-8")
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      click.echo(
+          click.style(
+              f"Error listing models: {e!r}\n{traceback.format_exc()}",
+              fg="red",
+          )
+      )
+      if not self.wfile.closed:
+        try:
+          self.send_error(500, "".join(traceback.format_exception_only(e)))
+        except BrokenPipeError:
+          pass
 
   def do_POST(self) -> None:  # pylint: disable=invalid-name
     """Handles POST requests for OpenAI API compatible endpoints."""
