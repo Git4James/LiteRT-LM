@@ -34,6 +34,7 @@ def run_server(
     host: str,
     port: int,
     handler_class: type[http.server.BaseHTTPRequestHandler],
+    api_name: str,
 ) -> None:
   """Starts the HTTP server.
 
@@ -41,13 +42,14 @@ def run_server(
     host: Host to listen on.
     port: Port to listen on.
     handler_class: The HTTP handler class to use.
+    api_name: The API protocol name (e.g., "OpenAI", "Gemini").
   """
   server_address = (host, port)
   try:
     with serve_util.LiteRTLMServer(server_address, handler_class) as server:
       click.echo(
           click.style(
-              f"Starting LiteRT-LM API server on {host}:{port}...",
+              f"Starting {api_name}-compatible API server on {host}:{port}...",
               fg="green",
               bold=True,
           )
@@ -64,25 +66,32 @@ def run_server(
 @click.command(
     cls=help_formatter.ColorCommand,
     help=(
-        "Start a server with a Gemini or OpenAI compatible API (alpha feature)"
+        "Start a server with an OpenAI-compatible API.\n\n"
+        "Supported OpenAI endpoints:\n"
+        "  - /v1/models\n"
+        "  - /v1/chat/completions\n\n"
+        "Tips:\n"
+        '  - Use "litert-lm import" to import a new model.\n'
+        '  - Use "litert-lm list" to view already imported models.\n\n'
     ),
 )
 @click.option("--host", default="0.0.0.0", type=str, help="Host to listen on")
 @click.option("--port", default=9379, type=int, help="Port to listen on")
 @click.option(
     "--api",
+    hidden=True,  # Hidden until Gemini implementation is ready.
     type=click.Choice(["openai", "gemini"], case_sensitive=False),
     default="openai",
     help="The API protocol to use.",
 )
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
 def serve(host: str, port: int, *, api: str, verbose: bool) -> None:
-  """Starts a local HTTP server speaking the Gemini or OpenAI API protocol.
+  """Starts a local HTTP server speaking the OpenAI or Gemini API protocol.
 
   Args:
     host: Host to listen on.
     port: Port to listen on.
-    api: The API protocol to use (gemini or openai).
+    api: The API protocol to use (openai or gemini).
     verbose: Whether to enable verbose logging.
   """
   if verbose:
@@ -91,12 +100,14 @@ def serve(host: str, port: int, *, api: str, verbose: bool) -> None:
   api_lower = api.lower()
   if api_lower == "gemini":
     handler_class = gemini_handler.GeminiHandler
+    api_name = "Gemini"
   elif api_lower == "openai":
     handler_class = openai_handler.OpenAIHandler
+    api_name = "OpenAI"
   else:
     raise click.BadParameter(f"Unsupported API: {api}")
 
-  run_server(host, port, handler_class)
+  run_server(host, port, handler_class, api_name)
 
 
 def register(cli: click.Group) -> None:
