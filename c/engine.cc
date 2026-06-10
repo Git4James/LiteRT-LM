@@ -111,7 +111,8 @@ std::optional<litert::lm::DataProcessorArguments> GetDataProcessorArguments(
 
 litert::lm::OptionalArgs CreateOptionalArgs(
     const litert::lm::Conversation* conversation, const char* extra_context,
-    std::optional<int> visual_token_budget) {
+    std::optional<int> visual_token_budget,
+    std::optional<int> max_output_tokens) {
   litert::lm::OptionalArgs litert_lm_optional_args;
   if (extra_context) {
     auto extra_context_json =
@@ -123,6 +124,9 @@ litert::lm::OptionalArgs CreateOptionalArgs(
   if (visual_token_budget.has_value()) {
     litert_lm_optional_args.args =
         GetDataProcessorArguments(conversation, *visual_token_budget);
+  }
+  if (max_output_tokens.has_value()) {
+    litert_lm_optional_args.max_output_tokens = max_output_tokens;
   }
   return litert_lm_optional_args;
 }
@@ -223,6 +227,7 @@ struct LiteRtLmConversationConfig {
 
 struct LiteRtLmConversationOptionalArgs {
   std::optional<int> visual_token_budget;
+  std::optional<int> max_output_tokens;
 };
 
 struct LiteRtLmDetokenizeResult {
@@ -411,6 +416,13 @@ void litert_lm_conversation_optional_args_set_visual_token_budget(
   }
 }
 
+void litert_lm_conversation_optional_args_set_max_output_tokens(
+    LiteRtLmConversationOptionalArgs* args, int max_output_tokens) {
+  if (args) {
+    args->max_output_tokens = max_output_tokens;
+  }
+}
+
 void litert_lm_conversation_optional_args_delete(
     LiteRtLmConversationOptionalArgs* args) {
   delete args;
@@ -476,6 +488,34 @@ void litert_lm_engine_settings_set_max_num_tokens(
         max_num_tokens);
   }
 }
+
+void litert_lm_engine_settings_set_num_threads(LiteRtLmEngineSettings* settings,
+                                               int num_threads) {
+  if (settings && settings->settings) {
+    auto& main_settings = settings->settings->GetMutableMainExecutorSettings();
+    auto config = main_settings.MutableBackendConfig<litert::lm::CpuConfig>();
+    if (config.ok()) {
+      litert::lm::CpuConfig cpu_config = *config;
+      cpu_config.number_of_threads = num_threads;
+      main_settings.SetBackendConfig(cpu_config);
+    } else {
+      ABSL_LOG(WARNING) << "Failed to get CpuConfig to set num threads: "
+                        << config.status();
+    }
+  }
+}
+
+void litert_lm_engine_settings_set_audio_num_threads(
+    LiteRtLmEngineSettings* settings, int num_threads) {
+  if (settings && settings->settings) {
+    auto& audio_settings =
+        settings->settings->GetMutableAudioExecutorSettings();
+    if (audio_settings.has_value()) {
+      audio_settings->SetNumThreads(num_threads);
+    }
+  }
+}
+
 void litert_lm_engine_settings_set_parallel_file_section_loading(
     LiteRtLmEngineSettings* settings, bool parallel_file_section_loading) {
   if (settings && settings->settings) {
@@ -1124,8 +1164,8 @@ LiteRtLmJsonResponse* litert_lm_conversation_send_message(
 
   OptionalArgs litert_lm_optional_args = CreateOptionalArgs(
       conversation->conversation.get(), extra_context,
-      optional_args ? std::optional<int>(optional_args->visual_token_budget)
-                    : std::nullopt);
+      optional_args ? optional_args->visual_token_budget : std::nullopt,
+      optional_args ? optional_args->max_output_tokens : std::nullopt);
 
   auto response = conversation->conversation->SendMessage(
       json_message, std::move(litert_lm_optional_args));
@@ -1168,8 +1208,8 @@ int litert_lm_conversation_send_message_stream(
 
   litert::lm::OptionalArgs litert_lm_optional_args = CreateOptionalArgs(
       conversation->conversation.get(), extra_context,
-      optional_args ? std::optional<int>(optional_args->visual_token_budget)
-                    : std::nullopt);
+      optional_args ? optional_args->visual_token_budget : std::nullopt,
+      optional_args ? optional_args->max_output_tokens : std::nullopt);
 
   absl::Status status = conversation->conversation->SendMessageAsync(
       json_message, CreateConversationCallback(callback, callback_data),

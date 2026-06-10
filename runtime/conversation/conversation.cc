@@ -103,7 +103,8 @@ absl::StatusOr<ConversationConfig> ConversationConfig::CreateInternal(
     std::optional<ConstraintProviderConfig> constraint_provider_config,
     std::optional<std::vector<Channel>> overwrite_channels,
     bool filter_channel_content_from_kv_cache,
-    bool return_error_on_parse_failure) {
+    bool return_error_on_parse_failure, bool return_error_on_max_tokens_reached,
+    bool enable_thinking) {
   if (preface.has_value() && !std::holds_alternative<JsonPreface>(*preface)) {
     return absl::InvalidArgumentError("Only JsonPreface is supported for now.");
   }
@@ -169,13 +170,25 @@ absl::StatusOr<ConversationConfig> ConversationConfig::CreateInternal(
       session_config_copy, preface.value_or(JsonPreface()), prompt_template,
       processor_config, enable_constrained_decoding, prefill_preface_on_init,
       std::move(constraint_provider_config), std::move(channels),
-      filter_channel_content_from_kv_cache, return_error_on_parse_failure);
+      filter_channel_content_from_kv_cache, return_error_on_parse_failure,
+      return_error_on_max_tokens_reached, enable_thinking);
 }
 
 absl::StatusOr<std::string>
 Conversation::GetSingleTurnTextFromSingleTurnTemplate(
     const Message& message, const OptionalArgs& optional_args) {
   absl::MutexLock lock(history_mutex_);  // NOLINT
+  std::optional<nlohmann::ordered_json> extra_context =
+      optional_args.extra_context;
+  if (!extra_context.has_value()) {
+    extra_context = nlohmann::ordered_json::object();
+  }
+  if (optional_args.enable_thinking.has_value()) {
+    (*extra_context)["enable_thinking"] = *optional_args.enable_thinking;
+  } else if (!extra_context->contains("enable_thinking") &&
+             config_.enable_thinking()) {
+    (*extra_context)["enable_thinking"] = true;
+  }
   ASSIGN_OR_RETURN(
       auto result,
       model_data_processor_->RenderSingleTurnTemplate(
@@ -183,8 +196,7 @@ Conversation::GetSingleTurnTextFromSingleTurnTemplate(
           config_.prefill_preface_on_init() ? JsonPreface() : preface_, message,
           prompt_template_,
           /*current_is_appending_message=*/is_appending_message_,
-          /*append_message=*/optional_args.has_pending_message,
-          optional_args.extra_context));
+          /*append_message=*/optional_args.has_pending_message, extra_context));
   is_appending_message_ = result.is_appending_message;
   return result.text;
 }
@@ -195,12 +207,21 @@ absl::StatusOr<std::string> Conversation::GetSingleTurnTextFromFullHistory(
   RETURN_IF_ERROR(FillPrefaceForPromptTemplateInput(
       preface_, model_data_processor_.get(), old_tmpl_input));
 
+  if (config_.enable_thinking()) {
+    old_tmpl_input.extra_context["enable_thinking"] = true;
+  }
+
   // Merge extra context for the message into the extra context provided in the
   // preface. Existing keys will be overwritten.
   if (optional_args.extra_context.has_value()) {
     for (const auto& [key, value] : optional_args.extra_context->items()) {
       old_tmpl_input.extra_context[key] = value;
     }
+  }
+
+  if (optional_args.enable_thinking.has_value()) {
+    old_tmpl_input.extra_context["enable_thinking"] =
+        *optional_args.enable_thinking;
   }
 
   absl::MutexLock lock(history_mutex_);  // NOLINT
@@ -220,13 +241,13 @@ absl::StatusOr<std::string> Conversation::GetSingleTurnTextFromFullHistory(
       new_tmpl_input.messages.push_back(message_tmpl_input);
     }
     new_tmpl_input.add_generation_prompt = true;
-    return prompt_template_.Apply(new_tmpl_input);
+    return ApplyTemplate(new_tmpl_input);
   }
 
   std::string old_string;
   if (!IsEmptyPreface(preface_) || !history_.empty()) {
     old_tmpl_input.add_generation_prompt = false;
-    ASSIGN_OR_RETURN(old_string, prompt_template_.Apply(old_tmpl_input));
+    ASSIGN_OR_RETURN(old_string, ApplyTemplate(old_tmpl_input));
   }
 
   PromptTemplateInput new_tmpl_input = std::move(old_tmpl_input);
@@ -237,7 +258,7 @@ absl::StatusOr<std::string> Conversation::GetSingleTurnTextFromFullHistory(
   }
   new_tmpl_input.add_generation_prompt = true;
   ASSIGN_OR_RETURN(const std::string& new_string,
-                   prompt_template_.Apply(new_tmpl_input));
+                   ApplyTemplate(new_tmpl_input));
   if (new_string.substr(0, old_string.size()) != old_string) {
     return absl::InternalError(absl::StrCat(
         "The new rendered template string does not start with the previous "
@@ -329,22 +350,29 @@ absl::StatusOr<std::unique_ptr<Conversation>> Conversation::Create(
     std::vector<Message> tmp_history;
     bool fallback =
         !conversation->prompt_template_.GetCapabilities().supports_single_turn;
+    std::optional<nlohmann::ordered_json> extra_context = std::nullopt;
+    if (config.enable_thinking()) {
+      extra_context =
+          nlohmann::ordered_json::object({{"enable_thinking", true}});
+    }
     const auto render_result =
         conversation->model_data_processor_->RenderSingleTurnTemplate(
             tmp_history, config.GetPreface(), Message(),
             config.GetPromptTemplate(),
             /*current_is_appending_message=*/false,
-            /*append_message=*/false,
-            /*extra_context=*/std::nullopt);
+            /*append_message=*/false, extra_context);
     if (fallback || absl::IsUnimplemented(render_result.status())) {
       // Fallback to the old way of prefilling the preface.
       PromptTemplateInput tmpl_input;
       RETURN_IF_ERROR(FillPrefaceForPromptTemplateInput(
           config.GetPreface(), conversation->model_data_processor_.get(),
           tmpl_input));
+      if (config.enable_thinking()) {
+        tmpl_input.extra_context["enable_thinking"] = true;
+      }
       tmpl_input.add_generation_prompt = false;
       ASSIGN_OR_RETURN(single_turn_text,
-                       conversation->prompt_template_.Apply(tmpl_input));
+                       conversation->ApplyTemplate(tmpl_input));
     } else if (render_result.ok()) {
       single_turn_text = render_result->text;
     } else {
@@ -552,7 +580,7 @@ absl::Status Conversation::SendMessageAsync(
               optional_args.args.value_or(std::monostate()),
               config_.GetChannels(), std::move(user_callback),
               std::move(cancel_callback), std::move(complete_message_callback),
-              open_channel_name));
+              open_channel_name, config_.return_error_on_max_tokens_reached()));
 
   ASSIGN_OR_RETURN(
       auto decode_config,
@@ -584,7 +612,9 @@ absl::Status Conversation::SendMessageAsync(
                 // status and do not proceed to decode.
                 (*callback)(responses.status());
               } else if (responses.ok() &&
-                         responses->GetTaskState() == TaskState::kCancelled) {
+                         (responses->GetTaskState() == TaskState::kCancelled ||
+                          responses->GetTaskState() ==
+                              TaskState::kMaxNumTokensReached)) {
                 (*callback)(responses);
               } else if (IsEmptyInputError(responses.status()) ||
                          responses->GetTaskState() == TaskState::kDone) {
@@ -760,6 +790,10 @@ absl::StatusOr<std::string> Conversation::GetPrefillTextForMessages(
   RETURN_IF_ERROR(FillPrefaceForPromptTemplateInput(
       preface_, model_data_processor_.get(), old_context));
 
+  if (config_.enable_thinking()) {
+    old_context.extra_context["enable_thinking"] = true;
+  }
+
   // Merge extra context for the message into the extra context provided in the
   // preface. Existing keys will be overwritten.
   if (optional_args.extra_context.has_value()) {
@@ -785,7 +819,7 @@ absl::StatusOr<std::string> Conversation::GetPrefillTextForMessages(
   // text, so the preface text will be *subtracted* from the returned text.
   std::string old_string;
   if (!old_messages.empty() || !include_preface) {
-    ASSIGN_OR_RETURN(old_string, prompt_template_.Apply(old_context));
+    ASSIGN_OR_RETURN(old_string, ApplyTemplate(old_context));
   }
 
   // Copy the `old` template context to the `new` template context.
@@ -801,7 +835,7 @@ absl::StatusOr<std::string> Conversation::GetPrefillTextForMessages(
   }
 
   // Render the `new` string.
-  ASSIGN_OR_RETURN(std::string new_string, prompt_template_.Apply(new_context));
+  ASSIGN_OR_RETURN(std::string new_string, ApplyTemplate(new_context));
 
   if (old_string.length() > new_string.length()) {
     return absl::InternalError(
@@ -865,6 +899,12 @@ Conversation::RewindAndGetInputDataVector(const OptionalArgs& optional_args) {
   checkpoint_message_index_ = std::nullopt;
 
   return input_data_vector;
+}
+
+absl::StatusOr<std::string> Conversation::ApplyTemplate(
+    PromptTemplateInput& input) {
+  StripBlobsFromTemplateInput(input);
+  return prompt_template_.Apply(input);
 }
 
 }  // namespace litert::lm

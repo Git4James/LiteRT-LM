@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import {Backend, Conversation, ConversationConfig, Engine, GpuArtisanConfig, LiteRtLm, loadLiteRtLm, SamplerType, Session, SessionConfig, unloadLiteRtLm, type Wasm} from '@litert-lm/core';
+import {Backend, Conversation, ConversationConfig, Engine, getOrLoadGlobalLiteRtLm, GpuArtisanConfig, LiteRtLm, loadLiteRtLm, SamplerType, Session, SessionConfig, unloadLiteRtLm, type Wasm} from '@litert-lm/core';
 // Placeholder for internal dependency on trusted resource url
 
 jasmine.DEFAULT_TIMEOUT_INTERVAL = 120_000;  // 120 seconds
@@ -26,7 +26,7 @@ describe('LiteRtLm tests', () => {
   let liteRtLm: LiteRtLm;
   async function resetLiteRtLm() {
     unloadLiteRtLm();
-    liteRtLm = await loadLiteRtLm('/wasm');
+    liteRtLm = await loadLiteRtLm(trustedResourceUrl`/wasm`);
     await liteRtLm.setupDefaultWebGpuDevice();
   }
 
@@ -39,6 +39,30 @@ describe('LiteRtLm tests', () => {
   it('loads the WASM module', () => {
     expect(liteRtLm).toBeDefined();
   });
+
+  it('loads or gets the global instance with getOrLoadGlobalLiteRtLm',
+     async () => {
+       unloadLiteRtLm();
+       const path1 = trustedResourceUrl`/wasm`;
+       const path2 = trustedResourceUrl`/other/wasm`;
+
+       // First call loads it
+       const p1 = getOrLoadGlobalLiteRtLm(path1);
+       const p2 = getOrLoadGlobalLiteRtLm(path1);
+       expect(p1).toBe(p2);  // Should return the exact same promise
+
+       // Calling with undefined uses the existing path instead of default when
+       // already loading/loaded
+       const p3 = getOrLoadGlobalLiteRtLm();
+       expect(p3).toBe(p1);
+
+       // Calling with a different path throws an error
+       expect(() => getOrLoadGlobalLiteRtLm(path2))
+           .toThrowError(
+               /LiteRT-LM is already loading \/ loaded with a different path/);
+
+       await p1;
+     });
 
   it('automatically loads the WASM module when loading a model', async () => {
     unloadLiteRtLm();
@@ -128,6 +152,7 @@ describe('LiteRtLm tests', () => {
               maxNumTokens: 128,
               backendConfig,
             },
+            benchmarkEnabled: true,
           });
         } catch (e) {
           console.error(e);
@@ -257,6 +282,37 @@ describe('LiteRtLm tests', () => {
 
         it('creates Conversation', () => {
           expect(conversation).toBeDefined();
+        });
+
+        it('gets token count initially and after sending message', async () => {
+          let tokenCount = await conversation.getTokenCount();
+          expect(tokenCount).toBe(0);
+
+          const message = {
+            role: 'user',
+            content: 'Hello',
+          };
+          await conversation.sendMessage(message);
+
+          tokenCount = await conversation.getTokenCount();
+          expect(tokenCount).toBeGreaterThan(0);
+        });
+
+        it('gets benchmark info after sending message', async () => {
+          const message = {
+            role: 'user',
+            content: 'Hello benchmark test',
+          };
+          await conversation.sendMessage(message);
+
+          const benchmark = await conversation.getBenchmarkInfo();
+          expect(benchmark).toBeDefined();
+
+          expect(benchmark.lastPrefillTokenCount).toBeGreaterThan(0);
+          expect(benchmark.lastDecodeTokenCount).toBeGreaterThan(0);
+          expect(benchmark.lastPrefillTokensPerSecond).toBeGreaterThan(0);
+          expect(benchmark.lastDecodeTokensPerSecond).toBeDefined();
+          expect(benchmark.timeToFirstTokenInSecond).toBeDefined();
         });
 
         it('sends message and gets response', async () => {
@@ -447,6 +503,30 @@ describe('LiteRtLm tests', () => {
     if (engine) await engine.delete();
   });
 
+  it('creates and runs a session from a Blob', async () => {
+    const response = await fetch(MODEL_PATH, {
+      credentials: 'same-origin',
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch model file from ${MODEL_PATH}`);
+    }
+    const engine = await Engine.create({
+      model: await response.blob(),
+      backend: Backend.CPU,
+      mainExecutorSettings: {
+        maxNumTokens: 128,
+      },
+    });
+    const sessionConfig: SessionConfig = {};
+    const session = await engine.createSession(sessionConfig);
+    await session.runPrefill(['test input']);
+    const responses = await session.runDecode();
+    expect(responses).toBeDefined();
+    responses.delete();
+    await session.delete();
+    if (engine) await engine.delete();
+  });
+
   describe('Wasm tests', () => {
     describe('ModelAssets', () => {
       it('creates ModelAssets', () => {
@@ -545,7 +625,7 @@ describe('LiteRtLm tests', () => {
 
       it('sets and gets advanced settings', () => {
         const advancedSettings = {
-          prefill_batch_sizes: new Set([1, 2, 3]),
+          prefill_batch_sizes: [1, 2, 3],
           num_output_candidates: 4,
           configure_magic_numbers: true,
           verify_magic_numbers: false,
@@ -616,7 +696,7 @@ describe('LiteRtLm tests', () => {
             executorSettings.setMaxNumTokens(128);
             executorSettings.setCacheDir(':nocache');
             const advancedSettings = {
-              prefill_batch_sizes: new Set([128]),
+              prefill_batch_sizes: [128],
               num_output_candidates: 1,
               configure_magic_numbers: true,
               verify_magic_numbers: true,

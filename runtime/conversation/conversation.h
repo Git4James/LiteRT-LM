@@ -97,6 +97,14 @@ class ConversationConfig {
     return return_error_on_parse_failure_;
   }
 
+  // Returns whether to return an error status when max num tokens reached.
+  bool return_error_on_max_tokens_reached() const {
+    return return_error_on_max_tokens_reached_;
+  }
+
+  // Returns whether thinking/reasoning generation is enabled.
+  bool enable_thinking() const { return enable_thinking_; }
+
  public:
   // Builder class for ConversationConfig.
   //
@@ -187,13 +195,26 @@ class ConversationConfig {
       return *this;
     }
 
+    // Sets whether to return an error status when max num tokens reached.
+    Builder& SetReturnErrorOnMaxTokensReached(
+        bool return_error_on_max_tokens_reached) {
+      return_error_on_max_tokens_reached_ = return_error_on_max_tokens_reached;
+      return *this;
+    }
+
+    // Sets whether thinking/reasoning generation is enabled.
+    Builder& SetEnableThinking(bool enable_thinking) {
+      enable_thinking_ = enable_thinking;
+      return *this;
+    }
+
     absl::StatusOr<ConversationConfig> Build(const Engine& engine) {
       return ConversationConfig::CreateInternal(
           engine, session_config_, preface_, overwrite_prompt_template_,
           overwrite_processor_config_, enable_constrained_decoding_,
           prefill_preface_on_init_, constraint_provider_config_, channels_,
-          filter_channel_content_from_kv_cache_,
-          return_error_on_parse_failure_);
+          filter_channel_content_from_kv_cache_, return_error_on_parse_failure_,
+          return_error_on_max_tokens_reached_, enable_thinking_);
     }
 
     // Returns a unique pointer to a ConversationConfig.
@@ -214,6 +235,8 @@ class ConversationConfig {
     std::optional<std::vector<Channel>> channels_ = std::nullopt;
     bool filter_channel_content_from_kv_cache_ = false;
     bool return_error_on_parse_failure_ = true;
+    bool return_error_on_max_tokens_reached_ = false;
+    bool enable_thinking_ = false;
   };
 
   // Returns the constrained decoding config.
@@ -260,7 +283,9 @@ class ConversationConfig {
           std::nullopt,
       std::optional<std::vector<Channel>> channels = std::nullopt,
       bool filter_channel_content_from_kv_cache = false,
-      bool return_error_on_parse_failure = true);
+      bool return_error_on_parse_failure = true,
+      bool return_error_on_max_tokens_reached = false,
+      bool enable_thinking = false);
 
   explicit ConversationConfig(SessionConfig session_config, Preface preface,
                               PromptTemplate prompt_template,
@@ -271,7 +296,9 @@ class ConversationConfig {
                                   constraint_provider_config = std::nullopt,
                               std::vector<Channel> channels = {},
                               bool filter_channel_content_from_kv_cache = false,
-                              bool return_error_on_parse_failure = true)
+                              bool return_error_on_parse_failure = true,
+                              bool return_error_on_max_tokens_reached = false,
+                              bool enable_thinking = false)
       : session_config_(std::move(session_config)),
         preface_(std::move(preface)),
         prompt_template_(std::move(prompt_template)),
@@ -282,7 +309,9 @@ class ConversationConfig {
         channels_(std::move(channels)),
         filter_channel_content_from_kv_cache_(
             filter_channel_content_from_kv_cache),
-        return_error_on_parse_failure_(return_error_on_parse_failure) {}
+        return_error_on_parse_failure_(return_error_on_parse_failure),
+        return_error_on_max_tokens_reached_(return_error_on_max_tokens_reached),
+        enable_thinking_(enable_thinking) {}
 
   SessionConfig session_config_;
   Preface preface_;
@@ -294,6 +323,8 @@ class ConversationConfig {
   std::vector<Channel> channels_;
   bool filter_channel_content_from_kv_cache_;
   bool return_error_on_parse_failure_;
+  bool return_error_on_max_tokens_reached_;
+  bool enable_thinking_;
 };
 
 // Optional arguments for sending a message to the LLM.
@@ -361,6 +392,10 @@ struct OptionalArgs {
   // context only applies to a single message and is merged with the extra
   // context provided in the Preface, overwriting existing keys.
   std::optional<nlohmann::ordered_json> extra_context = std::nullopt;
+
+  // Whether to enable thinking/reasoning generation. If provided, this value
+  // overrides the default value in `ConversationConfig`.
+  std::optional<bool> enable_thinking = std::nullopt;
 };
 
 // A multi-turn centric stateful Conversation API for high-level user
@@ -633,6 +668,10 @@ class Conversation {
   // and return the input data vector for all messages from that point onward.
   absl::StatusOr<std::vector<InputData>> RewindAndGetInputDataVector(
       const OptionalArgs& optional_args = OptionalArgs());
+
+  // Applies the prompt template to the given input. This function will strip
+  // heavy blobs from the input before applying the template.
+  absl::StatusOr<std::string> ApplyTemplate(PromptTemplateInput& input);
 
   // Keep a reference to the creator engine to enable access to the shared
   // resources that might be required for features like cloning.
